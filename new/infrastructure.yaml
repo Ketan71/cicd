@@ -1,0 +1,16 @@
+---
+ hosts: localhost
+ include_vars:
+   file: vars.yaml
+   name: vars
+ gather_facts: true
+ tasks:
+ - name: create vpc
+   ec2_vpc_net:
+     name: "{{ vpc_name }}"
+     cidr_block: "{{ vpc_cidr }}"
+     region: "{{ region }}"
+     state: present
+     register: vpc
+   debug:
+     msg: "{{ vpc }}"

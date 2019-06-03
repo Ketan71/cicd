@@ -1,0 +1,148 @@
+---
+- hosts: webserver
+  become: true
+  serial: 1
+  vars:
+          ansible_ssh_user: ubuntu
+  tasks:
+
+  - name: Get instance ID of EC2.
+    ec2_instance_facts:
+      region: us-east-1
+      filters:
+        "network-interface.association.public-ip" : "{{ inventory_hostname }}"
+        # "tag:Owner": "CICD"
+        instance-state-name: running
+    delegate_to: localhost
+    become_user: jenkins
+    register: ec2_id
+    tags: this
+    # - debug:
+    #  msg: "{{ ec2_id.instances }}"
+    # tags: this
+
+  - name: Deregister the instance
+    local_action:
+      module: elb_target
+      target_group_name: CICD-TargetGroup-result
+      target_status: unused
+      target_status_timeout: 50
+      region: us-east-1
+      target_id: "{{ ec2_id.instances[0].instance_id }}"
+      state: absent
+    become_user: jenkins
+
+  - name: check the directory is present or not
+    stat:
+      path: /home/ansible/result/app.py
+    register: check
+
+  - name: Backup the Existing SCM
+    archive:
+      path: /home/ansible/result
+      dest: /tmp/result.tar
+      format: tar
+    when: check.stat.exists
+
+
+
+
+    #this module will sync two repository
+  - shell: "mkdir -p /home/ansible/result"
+    when: check.stat.exists==false
+
+  - name: cleaning the old SCM
+    shell: rm -rf /home/ansible/result/*
+    when: check.stat.exists==true
+
+  - name: Deploying the Latest SCM
+    become: yes
+    synchronize:
+      src: /var/lib/jenkins/workspace/result/
+      dest: /home/ansible/result
+ 
+  - shell: rm -rf /home/ansible/result/*.tar.gz
+  #this module will kill the previous process and install neccesory packageis
+  - name: execute shell script
+    # shell: sudo dpkg --configure -a
+    shell: sudo apt-get update
+    shell: sudo apt-get install nodejs -y
+    shell: "npm install -C /home/ansible/result"
+   
+
+  - name: start script
+    # shell: pkill -f node
+    shell: "cd /home/ansible/result/"
+    shell: "npm install pm2 -g"
+
+  - name: script 2 
+    shell: "nohup node /home/ansible/result/server.js &"
+    shell: "pm2 stop /home/ansible/result/server.js"
+    shell: "pm2 start -f /home/ansible/result/server.js"
+
+  - wait_for:
+         port: 4000
+         timeout: 30
+    ignore_errors: true
+    register: health_check
+
+  - name: Create a simple Connector Card
+    office_365_connector_card:
+      webhook: https://outlook.office.com/webhook/0a8441d7-bd07-4c52-9295-ebf3b7164d33@815db2f7-1e3a-438f-8bdd-e55de825adee/IncomingWebhook/e43b113507734e1aa6f0c5ed018c9042/2a40e57b-5d6a-417d-bd66-6805982332a5
+      text: Result App is succesfully deployed on "{{ inventory_hostname }}".
+    when: health_check is success
+
+  - name: Create a simple Connector Card
+    office_365_connector_card:
+      webhook: https://outlook.office.com/webhook/0a8441d7-bd07-4c52-9295-ebf3b7164d33@815db2f7-1e3a-438f-8bdd-e55de825adee/IncomingWebhook/e43b113507734e1aa6f0c5ed018c9042/2a40e57b-5d6a-417d-bd66-6805982332a5
+      text: Result App deployment on "{{ inventory_hostname}}" FAILED.
+    when: health_check is failed
+
+  - stat:
+      path: /tmp/result.tar
+    register: bak
+
+  - name: rolling back to old version
+    unarchive:
+      src: /tmp/vote.tar
+      dest: /home/ansible/vote/
+      remote_src: yes
+    register: q
+    tags: tar
+    when: health_check is failed and bak.stat.exists
+
+  - name: Create a simple Connector Card
+    office_365_connector_card:
+      webhook: https://outlook.office.com/webhook/0a8441d7-bd07-4c52-9295-ebf3b7164d33@815db2f7-1e3a-438f-8bdd-e55de825adee/IncomingWebhook/e43b113507734e1aa6f0c5ed018c9042/2a40e57b-5d6a-417d-bd66-6805982332a5
+      text: Result App is succesfully rollbacked on "{{ inventory_hostname}}".
+    when: q.changed==true
+
+  - wait_for:
+         port: 4000
+         timeout: 30
+    ignore_errors: true
+    when: q.changed==true
+    register: rollback_check
+
+  - name: Create a simple Connector Card
+    office_365_connector_card:
+      webhook: https://outlook.office.com/webhook/0a8441d7-bd07-4c52-9295-ebf3b7164d33@815db2f7-1e3a-438f-8bdd-e55de825adee/IncomingWebhook/e43b113507734e1aa6f0c5ed018c9042/2a40e57b-5d6a-417d-bd66-6805982332a5
+      text: Result App is succesfully UP AFTER ROLLBACK on "{{ inventory_hostname}}"
+    when: rollback_check is success
+
+  - fail:
+          msg: "Deployment failed"
+    when: rollback_check is failed
+
+
+  - name: Register the instance
+    local_action:
+      module: elb_target
+      target_group_name: CICD-TargetGroup-result
+      target_status: healthy
+      target_status_timeout: 100
+      region: us-east-1
+      target_id: "{{ ec2_id.instances[0].instance_id }}"
+      state: present
+    become_user: jenkins
+

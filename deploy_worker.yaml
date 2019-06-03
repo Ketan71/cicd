@@ -1,0 +1,69 @@
+---
+- hosts: webserver
+  become: true
+  serial: 1
+  vars:
+          ansible_ssh_user: ubuntu
+  tasks:
+
+  - name: Get instance ID of EC2.
+    ec2_instance_facts:
+      region: us-east-1
+      filters:
+        "network-interface.association.public-ip" : "{{ inventory_hostname }}"
+        # "tag:Owner": "CICD"
+        instance-state-name: running
+    delegate_to: localhost
+    become_user: jenkins
+    register: ec2_id
+    tags: this
+  - debug:
+      msg: "{{ ec2_id.instances }}"
+    tags: this
+    #  - name: Deregister the instance
+    #local_action:
+    #  module: elb_target
+    #  target_group_name: CICD-TargetGroup-vote
+    #  target_status: unused
+    #  target_status_timeout: 50
+    #  region: us-east-1
+    #  target_id: "{{ ec2_id.instances[0].instance_id }}"
+    #  state: absent
+    #become_user: jenkins
+
+  - name: check the directory is present or not
+    stat:
+      path: /home/ansible/worker
+    register: check
+
+
+  - name: Backup the Existing SCM
+    archive:
+      path: /home/ansible/worker
+      dest: /tmp/worker.tar
+      format: tar
+    when: check.stat.exists
+
+    #this module will sync two repository
+  - shell: "mkdir -p /home/ansible/worker"
+    when: check.stat.exists==false
+
+  - name: cleaning the old SCM
+    shell: rm -rf /home/ansible/worker/*
+    when: check.stat.exists==true
+
+  - shell: "mkdir -p /home/ansible/worker"
+  - name: Deploying the Latest SCM
+    become: yes
+    synchronize:
+      src: /var/lib/jenkins/workspace/worker/src/Worker/bin/Debug/netcoreapp2.0/publish
+      dest: /home/ansible/worker
+
+  - name: start the service
+    shell: "pkill -f dotnet"
+    shell: 'nohup dotnet /home/ansible/worker/publish/Worker.dll> /dev/null 2>1 &'
+
+  - name: Create a simple Connector Card
+    office_365_connector_card:
+      webhook: https://outlook.office.com/webhook/0a8441d7-bd07-4c52-9295-ebf3b7164d33@815db2f7-1e3a-438f-8bdd-e55de825adee/IncomingWebhook/e43b113507734e1aa6f0c5ed018c9042/2a40e57b-5d6a-417d-bd66-6805982332a5
+      text: Worker is succesfully deployed on "{{ inventory_hostname }}"

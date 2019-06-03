@@ -1,0 +1,437 @@
+---
+- name: creating vpc and subnet
+  hosts: lclhst
+  become: true
+  become_user: ubuntu
+  vars:
+    - ansible_ssh_user: ubuntu
+  vars_files:
+    - vars.yaml
+  tasks:
+# creating vpc
+    - name: create vpc
+      ec2_vpc_net:
+        name: "{{ vpc_name }}"
+        cidr_block: "{{ vpc_cidr }}"
+        region: "{{ region }}"
+        state: present
+      register: vpc
+
+    - name: Set VPC ID in variable
+      set_fact:
+        vpc_id: "{{ vpc.vpc.id }}"
+    - debug:
+         msg: "{{ vpc_id }}"
+
+# creating 2 subnet in different AZ
+    - name: associate subnet to the VPC
+      ec2_vpc_subnet:
+        state: present
+        vpc_id: "{{ vpc_id }}"
+        region: "{{ region }}"
+        az: "{{ az1 }}"
+        cidr: "{{ subnet_cidr_pub }}"
+        map_public: yes
+        resource_tags:
+          Name: "{{ subnet_name_pub }}"
+      register: subnet1
+
+    - name: associate subnet2 to the VPC
+      ec2_vpc_subnet:
+        state: present
+        vpc_id: "{{ vpc_id }}"
+        region: "{{ region }}"
+        az: "{{ az2 }}"
+        cidr: "{{ subnet_cidr_pvt }}"
+        map_public: yes
+        resource_tags:
+          Name: "{{ subnet_name_pvt }}"
+      register: subnet2
+    - name: set subnet ID in variable
+      set_fact:
+        subnet1_id: "{{ subnet1.subnet.id }}"
+        subnet2_id: "{{ subnet2.subnet.id }}"
+    - debug:
+        msg: "{{ subnet2_id }}" 
+    - debug:
+        msg: "{{ subnet1_id }}"
+
+# Creating two security group for ec2 and Loadbalancer  
+    - name: Create Security Group For Load Balancer
+      ec2_group:
+        name: CI-CD-Loadbalancer-sg 
+        description: CI-CD Security Group for web
+        vpc_id: "{{ vpc_id }}"
+        region: "{{ region }}"
+        rules:
+         - proto: tcp
+           ports:
+           - 80
+           - 443
+           - 4000
+           cidr_ip: 0.0.0.0/0
+         - proto: tcp
+           ports:
+           - 22
+           cidr_ip: 0.0.0.0/0
+      register: security_group_lb
+    - debug:
+        msg: "{{ security_group_lb.group_id }}"
+
+    - name: Create Security Group For RDS
+      ec2_group:
+        name: db_sg_rds
+        description: CI-CD Security Group for RDS
+        vpc_id: "{{ vpc_id }}"
+        region: "{{ region }}"
+        rules:
+         - proto: tcp
+           ports:
+           - 5432
+           cidr_ip: "{{ vpc_cidr }}"
+         - proto: tcp
+           ports:
+           - 22
+           cidr_ip: 0.0.0.0/0
+      register: security_group_rds
+    - debug:
+        msg: "{{ security_group_rds.group_id }}"
+
+    - name: Get Public_IP
+      shell: host myip.opendns.com resolver1.opendns.com | grep  address | awk '{print$4}'
+      register: shell
+    - debug:
+        msg: "{{ shell.stdout }}"
+    - name: set public ip 
+      set_fact:
+        public_ip: "{{ shell.stdout }}"
+    - debug:
+        msg: "{{ public_ip }}"
+
+    - name: create security group for EC2
+      ec2_group:
+        name: CI-CD-EC2-sg  
+        description: CI-CD Security Group for ec2
+        vpc_id: "{{ vpc_id }}"
+        region: "{{ region }}"
+        rules:
+         - proto: tcp
+           ports:
+           - 22
+           cidr_ip: 
+           - "{{ public_ip }}/32"
+         - proto: icmp
+           from_port: 8
+           to_port: -1
+           cidr_ip:
+           - "{{ vpc_cidr }}"
+           - "{{ public_ip }}/32"
+         - proto: tcp
+           ports:
+           - 80
+           - 4000
+           - 443
+           cidr_ip: 
+           - 0.0.0.0/0
+      register: security_group_ec2
+    - debug:
+        msg: "{{ security_group_ec2.group_id }}"
+    - name: set security_group id in variable
+      set_fact:
+        elb_sg: "{{ security_group_lb.group_id }}"
+        ec2_sg: "{{ security_group_ec2.group_id }}"
+        rds_sg: "{{ security_group_rds.group_id }}"
+    - debug:
+        msg: "{{ elb_sg }}"
+    - debug:
+        msg: "{{ ec2_sg }}"
+    - debug:
+        msg: "{{ rds_sg }}"
+# Creating IGW and Route for IGW
+    - name: create IGW
+      ec2_vpc_igw:
+        vpc_id: "{{ vpc_id }}"
+        region: "{{ region }}"
+        state: "present"
+        tags:
+          Name: "{{ igw_name }}"
+      register: igw
+
+
+    - name: Route IGW
+      ec2_vpc_route_table:
+        vpc_id: "{{ vpc_id }}"
+        region: "{{ region }}"
+        subnets:
+        - "{{ subnet1_id }}"
+        - "{{ subnet2_id }}"
+        routes:
+        - dest: 0.0.0.0/0
+          gateway_id: "{{ igw.gateway_id  }}"
+        tags:
+          Name: "{{ route_name }}"
+
+    - rds_subnet_group:
+        state: present
+        name: CICD-subnet_group
+        region: "{{ region }}"
+        description: CICD internal project Subnet Group
+        subnets:
+          - "{{ subnet1_id }}"
+          - "{{ subnet2_id }}"
+      register: rds_subnet
+    - debug: var=rds_subnet
+      tags: run
+# creating rds with postgres engine
+    - name: create rds instance with postgreSQL engine
+      rds:
+        command: create
+        instance_name: "{{ db_name }}"
+        region: "{{ region }}"
+        size: "{{ db_size }}"
+        instance_type: "{{ db_instance_type }}"
+        db_engine: "{{ db_engine }}"
+        subnet: "{{ rds_subnet.subnet_group.name }}"
+        port: 5432
+        db_name: "{{ db_name }}"
+        username: "{{ db_username }}"
+        password: "{{ db_password }}"
+        vpc_security_groups: "{{ rds_sg }}"
+      register : rds
+
+    - debug: var=rds
+
+
+# Creating 2 ec2-instance in two different Subnets
+    - name: create an EC2 instance
+      ec2:
+        key_name: "{{ keypair }}"
+        group_id: "{{ ec2_sg }}"
+        instance_type: "{{ instance_type }}"
+        image: "{{ ami }}"
+        wait: true
+        id: "222"
+        region: "{{ region }}"
+        instance_tags:
+          Name: webserver1
+          Owner: CICD 
+        vpc_subnet_id: "{{ subnet1_id }}"
+        assign_public_ip: yes
+      tags: ignore
+      register: webserver1
+    - name: create an EC2 instance
+      ec2:
+        key_name: "{{ keypair }}"
+        group_id: "{{ ec2_sg }}"
+        instance_type: "{{ instance_type }}"
+        image: "{{ ami }}"
+        id: "111"
+        wait: true
+        region: "{{ region }}"
+        instance_tags:
+          Name: webserver2
+          Owner: CICD 
+        vpc_subnet_id: "{{ subnet2_id }}"
+        assign_public_ip: yes
+      tags: ignore
+      register: webserver2
+    - name: set public ip in variable
+      set_fact:
+        webserver1_ip: "{{ webserver1.instances[0].public_ip }}"
+        webserver2_ip: "{{ webserver2.instances[0].public_ip }}"      
+    - debug:
+        msg: "{{ webserver1_ip }}"
+    - debug:
+        msg: "{{ webserver2_ip }}"
+
+# Writing server ip in ansible/hosts file
+    - blockinfile:
+        path: /etc/ansible/hosts
+        block: |
+          lclhst ansible_host=127.0.0.1 connection=local ansible_user=root
+          [webserver]
+          {{ webserver1_ip }} ansible_ssh_private_key_file=/home/ansible/CI-CD_internal/ketan-ansible.pem ansible_ssh_user=ubuntu  host_key_checking=false
+          {{ webserver2_ip }} ansible_ssh_private_key_file=/home/ansible/CI-CD_internal/ketan-ansible.pem ansible_ssh_user=ubuntu  host_key_checking=false
+      tags: test
+
+    - blockinfile:
+        path: /home/ansible/hosts
+        block: |
+          [webserver]
+          {{ webserver1_ip }}  host_key_checking=false
+          {{ webserver2_ip }}  host_key_checking=false
+# Taking instance id which is required for Load Balancer
+    - ec2_instance_facts:
+        filters:
+          "tag:Owner": CICD
+#         "instance-state-code": "16"
+          "instance-state-name": running
+        region: "{{ region }}"
+      register: ec2_data 
+      tags: check
+    - debug:
+        msg:
+        - "{{ ec2_data.instances[0].instance_id }}"
+        - "{{ ec2_data.instances[1].instance_id }}" 
+      tags: check
+    - name: set instance id to variable
+      set_fact:
+        instance1_id: "{{ ec2_data.instances[0].instance_id }}"
+        instance2_id: "{{ ec2_data.instances[1].instance_id }}"
+ 
+    - name: creating target group
+      elb_target_group:
+        name: "{{ target_group_name_vote }}"
+        protocol: http
+        port: 80
+        vpc_id: "{{ vpc_id }}"
+        aws_region: "{{ region }}"
+        health_check_path: /
+        targets:
+          - Id: "{{ instance1_id }}"
+            Port: 80
+          - Id: "{{ instance2_id }}"
+            Port: 80
+        state: present
+        deregistration_delay_timeout: 40
+        wait_timeout: 30
+      tags: run
+
+    - name: creating target group for result
+      elb_target_group:
+        name: "{{ target_group_name_result }}"
+        protocol: http
+        port: 4000
+        vpc_id: "{{ vpc_id }}"
+        aws_region: "{{ region }}"
+        health_check_path: /
+        targets:
+          - Id: "{{ instance1_id }}"
+            Port: 4000
+          - Id: "{{ instance2_id }}"
+            Port: 4000
+        deregistration_delay_timeout: 40
+        state: present
+        wait_timeout: 30
+      tags: run
+
+
+    - name: creating loadbalancer
+      elb_application_lb:
+        name: "{{ elb_name }}"
+        scheme: internet-facing
+        aws_region: "{{ region }}"
+        security_groups: "{{ elb_sg }}"
+        purge_listeners: false
+        subnets:
+          - "{{ subnet1_id }}"
+          - "{{ subnet2_id }}"
+        listeners:
+          - Protocol: HTTP
+            Port: "{{ item.port }}"
+            DefaultActions:
+              - Type: forward
+                TargetGroupName: "{{ item.tg }}"
+                # - get_group_name_vote }}"
+                # - "{{ target_group_name_result }}"
+        state: present
+
+      with_items: 
+        - { port: 80, tg: "{{ target_group_name_vote }}"}
+        - { port: 4000, tg: "{{ target_group_name_result }}"}
+        
+          # state: present
+      tags: run
+
+    - name: Create Security Group For RDS
+      ec2_group:
+        name: sg_redis
+        description: CI-CD Security Group for redis
+        vpc_id: "{{ vpc_id }}"
+        region: "{{ region }}"
+        rules:
+         - proto: tcp
+           ports:
+           - 6379
+           cidr_ip: 0.0.0.0/0
+      register: security_group_redis
+    - debug:
+        msg: "{{ security_group_redis.group_id }}"
+
+    - elasticache_subnet_group:
+        state: present
+        name: cicd-cache-subnet
+        region: "{{ region }}"
+        description: CICD redis setup
+        subnets:
+        - "{{ subnet1_id }}"
+        - "{{ subnet2_id }}"
+      register: redis_subnet
+      tags: ignoreme    
+    - debug: 
+        msg: "{{ redis_subnet }}"
+
+    - elasticache:
+        name: "cicd-redis-new"
+        state: present
+        engine: redis
+        node_type: cache.t2.micro
+        num_nodes: 1
+        cache_port: 6379
+        security_group_ids:
+           - "{{ security_group_redis.group_id }}"
+        cache_subnet_group: cicd-cache-subnet
+        zone: "{{ az1 }}"
+      register: redis
+      tags: dont_ignoreme
+    - debug:
+            msg: "{{ redis.elasticache.data.CacheNodes[0].Endpoint.Address }}"
+      tags: dont_ignoreme
+
+    - name: Create a simple Connector Card
+      office_365_connector_card:
+        webhook: https://outlook.office.com/webhook/0a8441d7-bd07-4c52-9295-ebf3b7164d33@815db2f7-1e3a-438f-8bdd-e55de825adee/IncomingWebhook/ebbc1d6e55f04cdeb81084e5bce444cb/2a40e57b-5d6a-417d-bd66-6805982332a5
+        text: Infrastructure is UP and WORKING
+      tags: new11
+    - debug: 
+        msg: "{{ webserver1_ip }}"
+
+        #    - name: sending variables
+  # hosts: "{{ webserver1_ip }}"
+  #vars_files:
+  #  - vars.yaml
+  #tasks:
+
+      # shell: export DB_NAME="{{ db_name }}";DB_USERNAME="{{ db_name }}";DB_PAS    SWORD="{{ db_password }}";export DB_EP="{{ rds.instance.endpoint }}";REDIS_EP="{{ redis.elasticache.data.CacheNodes[0].Endpoint.Address }}"
+      # shell: echo export DB_NAME=""{{ db_name }}"" >> /etc/profile
+      #shell: echo export DB_USERNAME=""{{ db_name }}"" >> /etc/profile
+      # shell: echo export DB_PASSWORD=""{{ db_password }}"" >> /etc/profile
+      #shell: echo export DB_EP=""{{ rds.instance.endpoint }}"" >> /etc/profile
+      #shell: echo export REDIS_EP=""{{ redis.elasticache.data.CacheNodes[0].Endpoint.Address }}"" >> /etc/profile
+      #tags: dont_ignoreme
+      #delegate_to: "{{ item }}"
+      #with_items: ["{{ webserver1_ip }}", "{{ webserver2_ip }}"]
+      #become_user: root
+      #
+
+        #- lineinfile:
+        # line: DB_NAME=""{{ db_name }}"" 
+        # path: /etc/profile
+        # regexp: ^DB_USERNAME
+        #delegate_to: "{{ item }}"
+        #with_items: ["{{ webserver1_ip }}", "{{ webserver2_ip }}"]
+        # become_user: root
+
+    - blockinfile:
+        block: |
+           export DB_NAME="{{ db_name }}"
+           export DB_USERNAME="{{ db_name }}"
+           export DB_PASSWORD="{{ db_password }}"
+           export DB_EP="{{ rds.instance.endpoint }}"
+           export REDIS_EP="{{ redis.elasticache.data.CacheNodes[0].Endpoint.Address }}"
+        path: /etc/environment
+        #regexp: ^DB_USERNAME
+      delegate_to: "{{ item }}"
+      with_items: ["{{ webserver1_ip }}", "{{ webserver2_ip }}"]
+      become_user: root
+

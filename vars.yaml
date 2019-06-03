@@ -1,0 +1,46 @@
+aws_access_key: ""
+aws_secret_key: ""
+region: "us-east-1"
+az1: "us-east-1a"
+az2: "us-east-1b"
+
+# VPC
+vpc_cidr: 10.10.0.0/20
+vpc_name: "CI-CD VPC"
+# Subnet
+subnet_name_pub: "CI-CD Subnet 1"
+subnet_cidr_pub: 10.10.0.0/24
+
+subnet_name_pvt: "CI-CD Subnet 2"
+subnet_cidr_pvt: 10.10.1.0/24
+
+igw_name: "Traffic IGW"
+
+
+#route table name
+route_name: "Public Ansible"
+
+securitygroup_name: "Ansible Security Group"
+
+#ec2 metadata
+ec2_tag: "WebServer"
+
+#region: us-east-1
+instance_type: t2.micro
+ami: ami-02b6fb65de3db4392
+keypair: ketan-ansible
+
+target_group_name_vote: "CICD-TargetGroup-vote"
+target_group_name_result: "CICD-TargetGroup-result"
+
+elb_name: "CICD-ELB"
+ec2_instance_id: []
+
+#rds variables
+db_size: 10
+db_instance_type: db.t2.micro
+db_engine: "postgres"
+rds_instance_name: vote-db
+db_name: voteappDB
+db_username: superuser
+db_password: reset123
